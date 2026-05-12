@@ -29,7 +29,7 @@ COLOR_PALETTE = {
 }
 
 MODEL_COLORS = {
-    "yolo11n": COLOR_PALETTE["dark"],
+    "mediapipe": COLOR_PALETTE["dark"],
     "yolo11s": COLOR_PALETTE["medium_dark"],
     "sam3d": COLOR_PALETTE["medium"],
     "metrabs": COLOR_PALETTE["light"],
@@ -41,6 +41,7 @@ MODEL_DISPLAY_NAMES = {
     "yolo11s": "Pose YOLO11s",
     "sam3d": "SAM3D-Body",
     "metrabs": "METRabs",
+    "mediapipe": "MediaPipe",
 }
 
 # ==========================================

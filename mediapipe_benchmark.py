@@ -1,14 +1,17 @@
 """
-Simple Metrabs Pose Estimation Benchmark
+Simple MediaPipe Pose Estimation Benchmark
 Opens camera, runs pose estimation, and measures performance metrics.
-Based on Pose_3D_metrabs_server_mediapipe_hand.py
+Mirrors metrabs_simple_benchmark.py but uses MediaPipe Pose.
 """
 
 import cv2
-import torch
-import os
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+import numpy as np
 import time
 import csv
+import os
 from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "FALSE"
@@ -16,17 +19,31 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "FALSE"
 import settings
 settings.add_server_dir_to_path()
 
-import numpy as np
-import pose_mapping as pose_map
-
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 
 NUM_MEASUREMENTS = 100
-OUTPUT_CSV = "metrabs_simple_benchmark.csv"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+OUTPUT_CSV = "mediapipe_benchmark.csv"
+POSE_MODEL_PATH = "01-server/hand_detection/pose_landmarker_full.task"
+
+# MediaPipe Pose skeleton connections
+POSE_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 7),       # face left
+    (0, 4), (4, 5), (5, 6), (6, 8),       # face right
+    (9, 10),                               # mouth
+    (11, 12),                              # shoulders
+    (11, 13), (13, 15),                    # left arm
+    (12, 14), (14, 16),                    # right arm
+    (15, 17), (17, 19), (19, 15),          # left hand
+    (16, 18), (18, 20), (20, 16),          # right hand
+    (15, 21), (16, 22),                    # wrist pinky
+    (11, 23), (12, 24),                    # torso top
+    (23, 24),                              # hips
+    (23, 25), (25, 27), (27, 29), (29, 31), (31, 27),  # left leg
+    (24, 26), (26, 28), (28, 30), (30, 32), (32, 28),  # right leg
+]
 
 
 # ==========================================
@@ -66,43 +83,51 @@ def _open_camera():
     return cap
 
 
-def load_metrabs_model():
-    """Load Metrabs model and calibration."""
-    print("Loading Metrabs model...")
-    intrinsic_matrix, distortion_coeffs, model, joint_names, joint_edges = pose_map._load_metrabs_model()
-    print(f"Model loaded on {DEVICE}")
-    print(f"Skeleton: {settings.SKELETON}")
-    return model, intrinsic_matrix, distortion_coeffs, joint_edges
+def load_mediapipe_model():
+    """Load MediaPipe Pose model."""
+    print("Loading MediaPipe Pose model...")
+    
+    base_options = python.BaseOptions(model_asset_path=POSE_MODEL_PATH)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.IMAGE,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    
+    landmarker = vision.PoseLandmarker.create_from_options(options)
+    print("MediaPipe Pose model loaded")
+    return landmarker
 
 
-def draw_keypoints(frame, poses2d, joint_edges, keypoint_radius=5, line_color=(0, 255, 0), point_color=(0, 0, 255)):
-    """Draw 2D keypoints and skeleton on frame."""
-    # Convert GPU tensor to numpy if needed
-    if hasattr(poses2d, 'cpu'):
-        poses2d = poses2d.cpu().numpy()
-    elif not isinstance(poses2d, np.ndarray):
-        poses2d = np.array(poses2d)
+def draw_keypoints(frame, pose_landmarks):
+    """Draw pose keypoints and skeleton on frame."""
+    if not pose_landmarks or len(pose_landmarks) == 0:
+        return frame
     
     frame_h, frame_w = frame.shape[:2]
     
     # Draw skeleton lines
-    if joint_edges is not None:
-        for edge in joint_edges:
-            i, j = edge
-            if i < len(poses2d[0]) and j < len(poses2d[0]):
-                pt1 = poses2d[0, i].astype(int)
-                pt2 = poses2d[0, j].astype(int)
-                
-                # Check if points are within frame
-                if (0 <= pt1[0] < frame_w and 0 <= pt1[1] < frame_h and
-                    0 <= pt2[0] < frame_w and 0 <= pt2[1] < frame_h):
-                    cv2.line(frame, tuple(pt1), tuple(pt2), line_color, 2)
+    for start_idx, end_idx in POSE_CONNECTIONS:
+        if start_idx < len(pose_landmarks) and end_idx < len(pose_landmarks):
+            start = pose_landmarks[start_idx]
+            end = pose_landmarks[end_idx]
+            
+            start_pos = (int(start.x * frame_w), int(start.y * frame_h))
+            end_pos = (int(end.x * frame_w), int(end.y * frame_h))
+            
+            # Check bounds
+            if (0 <= start_pos[0] < frame_w and 0 <= start_pos[1] < frame_h and
+                0 <= end_pos[0] < frame_w and 0 <= end_pos[1] < frame_h):
+                cv2.line(frame, start_pos, end_pos, (0, 255, 0), 2)
     
     # Draw keypoint circles
-    for joint_idx in range(poses2d[0].shape[0]):
-        pt = poses2d[0, joint_idx].astype(int)
-        if 0 <= pt[0] < frame_w and 0 <= pt[1] < frame_h:
-            cv2.circle(frame, tuple(pt), keypoint_radius, point_color, -1)
+    for landmark in pose_landmarks:
+        cx, cy = int(landmark.x * frame_w), int(landmark.y * frame_h)
+        if 0 <= cx < frame_w and 0 <= cy < frame_h:
+            cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
     
     return frame
 
@@ -116,16 +141,14 @@ def benchmark():
     measurements = []
     
     print(f"\n{'='*60}")
-    print("METRABS SIMPLE BENCHMARK")
+    print("MEDIAPIPE POSE BENCHMARK")
     print(f"{'='*60}")
     print(f"Target measurements: {NUM_MEASUREMENTS}")
-    print(f"Device: {DEVICE}\n")
+    print(f"Model: {POSE_MODEL_PATH}\n")
     
     # Setup
     cap = _open_camera()
-    model, intrinsic_matrix, distortion_coeffs, joint_edges = load_metrabs_model()
-    
-    torch.backends.cudnn.benchmark = True
+    landmarker = load_mediapipe_model()
     
     frame_count = 0
     measurement_count = 0
@@ -139,12 +162,16 @@ def benchmark():
             
             frame_count += 1
             
+            # Convert BGR to RGB for MediaPipe
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+            
             # Record time before inference
             start_time = time.perf_counter()
             
-            # Run pose estimation (same way as server)
+            # Run pose estimation
             try:
-                pred = pose_map._detect_poses(model, image, intrinsic_matrix, distortion_coeffs)
+                detection_result = landmarker.detect(mp_image)
             except Exception as e:
                 print(f"Inference error on frame {frame_count}: {e}")
                 continue
@@ -161,7 +188,7 @@ def benchmark():
             
             # Store measurement
             measurement = {
-                "model": "metrabs",
+                "model": "mediapipe",
                 "frame_number": measurement_count + 1,
                 "inference_time_ms": round(inference_time_ms, 4),
                 "fps": round(fps, 2),
@@ -180,8 +207,8 @@ def benchmark():
             frame_vis = image.copy()
             
             # Draw keypoints if available
-            if pred and "poses2d" in pred:
-                frame_vis = draw_keypoints(frame_vis, pred["poses2d"], joint_edges)
+            if detection_result and detection_result.pose_landmarks:
+                frame_vis = draw_keypoints(frame_vis, detection_result.pose_landmarks[0])
             
             cv2.putText(
                 frame_vis,
@@ -202,7 +229,7 @@ def benchmark():
                 2
             )
             
-            cv2.imshow("Metrabs Benchmark", frame_vis)
+            cv2.imshow("MediaPipe Pose Benchmark", frame_vis)
             
             # Exit with ESC
             if cv2.waitKey(1) & 0xFF == 27:
@@ -275,7 +302,7 @@ def save_to_csv(measurements, output_file):
 def main():
     """Main function."""
     print("\n" + "="*60)
-    print("METRABS POSE ESTIMATION BENCHMARK")
+    print("MEDIAPIPE POSE ESTIMATION BENCHMARK")
     print("="*60)
     print(f"Measurements: {NUM_MEASUREMENTS}")
     print(f"Output file: {OUTPUT_CSV}")
